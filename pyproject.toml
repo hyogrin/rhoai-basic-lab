@@ -1,0 +1,12 @@
+[project]
+name = "rhoai-basic-lab"
+version = "0.1.0"
+description = "RHOAI basic lab — Kubeflow MNIST distributed training demo"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "kfp==2.16.0",
+    "kubeflow>=0.4.1",
+    "numpy~=2.4.0",
+    "scikit-learn~=1.8.0",
+    "torch~=2.10.0",
+]

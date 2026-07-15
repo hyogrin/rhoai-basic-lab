@@ -1,0 +1,374 @@
+# PIPELINE DEFINITION
+# Name: mnist-multi-node-gpu-ddp
+# Description: Two-task KFP pipeline that launches a Kubeflow Trainer v2 TrainJob for multi-node, multi-GPU PyTorch DDP.
+# Inputs:
+#    batch_size: int [Default: 64.0]
+#    cpu_per_node: int [Default: 4.0]
+#    epochs: int [Default: 5.0]
+#    gpus_per_node: int [Default: 1.0]
+#    learning_rate: float [Default: 0.05]
+#    memory_per_node: str [Default: '8Gi']
+#    model_path: str [Default: '/mnt/shared/model.pt']
+#    model_pvc_name: str [Default: '']
+#    num_nodes: int [Default: 2.0]
+#    runtime_name: str [Default: 'torch-distributed']
+#    seed: int [Default: 42.0]
+#    test_size: float [Default: 0.2]
+components:
+  comp-launch-distributed-training:
+    executorLabel: exec-launch-distributed-training
+    inputDefinitions:
+      parameters:
+        batch_size:
+          defaultValue: 64.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        cpu_per_node:
+          defaultValue: 4.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        data_config_json:
+          parameterType: STRING
+        epochs:
+          defaultValue: 5.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        gpus_per_node:
+          defaultValue: 1.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        learning_rate:
+          defaultValue: 0.05
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+        memory_per_node:
+          defaultValue: 8Gi
+          isOptional: true
+          parameterType: STRING
+        model_path:
+          defaultValue: /mnt/shared/model.pt
+          isOptional: true
+          parameterType: STRING
+        model_pvc_name:
+          defaultValue: ''
+          isOptional: true
+          parameterType: STRING
+        num_nodes:
+          defaultValue: 2.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        runtime_name:
+          defaultValue: torch-distributed
+          isOptional: true
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-prepare-data-config:
+    executorLabel: exec-prepare-data-config
+    inputDefinitions:
+      parameters:
+        seed:
+          defaultValue: 42.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        test_size:
+          defaultValue: 0.2
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+deploymentSpec:
+  executors:
+    exec-launch-distributed-training:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - launch_distributed_training
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kubernetes>=28.0.0'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef launch_distributed_training(\n    data_config_json: str,\n  \
+          \  num_nodes: int = 2,\n    gpus_per_node: int = 1,\n    cpu_per_node: int\
+          \ = 4,\n    memory_per_node: str = \"8Gi\",\n    epochs: int = 5,\n    batch_size:\
+          \ int = 64,\n    learning_rate: float = 0.05,\n    runtime_name: str = \"\
+          torch-distributed\",\n    model_pvc_name: str = \"\",\n    model_path: str\
+          \ = \"/mnt/shared/model.pt\",\n) -> str:\n    \"\"\"Create a TrainJob via\
+          \ Kubeflow Trainer v2, wait for it, return job name.\"\"\"\n    import json\n\
+          \    import time\n    import uuid\n\n    from kubernetes import client as\
+          \ k8s_client\n    from kubernetes import config as k8s_config\n\n    data_config\
+          \ = json.loads(data_config_json)\n    job_name = \"mnist-ddp-\" + uuid.uuid4().hex[:8]\n\
+          \n    seed = int(data_config[\"seed\"])\n    test_size = float(data_config[\"\
+          test_size\"])\n\n    import base64\n\n    train_script = r\"\"\"\nimport\
+          \ os, sys, json\nfrom pathlib import Path\nimport numpy as np\nimport torch\n\
+          import torch.distributed as dist\nfrom sklearn.datasets import load_digits\n\
+          from sklearn.model_selection import train_test_split\nfrom torch.nn.parallel\
+          \ import DistributedDataParallel as DDP\nfrom torch.utils.data import DataLoader,\
+          \ DistributedSampler, TensorDataset\n\nclass DigitNet(torch.nn.Module):\n\
+          \    def __init__(self):\n        super().__init__()\n        self.network\
+          \ = torch.nn.Sequential(\n            torch.nn.Flatten(), torch.nn.Linear(64,128),\n\
+          \            torch.nn.ReLU(), torch.nn.Linear(128,10))\n    def forward(self,\
+          \ x):\n        return self.network(x)\n\nrank = int(os.environ[\"RANK\"\
+          ])\nlocal_rank = int(os.environ[\"LOCAL_RANK\"])\nworld_size = int(os.environ[\"\
+          WORLD_SIZE\"])\ncfg = json.loads(os.environ[\"TRAIN_CONFIG\"])\n\nif not\
+          \ torch.cuda.is_available():\n    raise RuntimeError(\"CUDA is not available\"\
+          )\ntorch.cuda.set_device(local_rank)\ndevice = torch.device(\"cuda\", local_rank)\n\
+          dist.init_process_group(backend=\"nccl\", init_method=\"env://\")\ntry:\n\
+          \    print(f\"[rank={rank}] local_rank={local_rank} world_size={world_size}\
+          \ \"\n          f\"host={os.uname().nodename} device={device}\")\n    digits\
+          \ = load_digits()\n    x = digits.images.astype(np.float32)/16.0\n    x\
+          \ = x[:,None,:,:]\n    y = digits.target.astype(np.int64)\n    x_tr,x_te,y_tr,y_te\
+          \ = train_test_split(\n        x,y,test_size=cfg[\"test_size\"],random_state=cfg[\"\
+          seed\"],stratify=y)\n    x_tr=torch.from_numpy(x_tr).float(); y_tr=torch.from_numpy(y_tr).long()\n\
+          \    x_te=torch.from_numpy(x_te).float(); y_te=torch.from_numpy(y_te).long()\n\
+          \    ds = TensorDataset(x_tr,y_tr)\n    sampler = DistributedSampler(ds,num_replicas=world_size,rank=rank,\n\
+          \                                 shuffle=True,seed=cfg[\"seed\"])\n   \
+          \ loader = DataLoader(ds,batch_size=cfg[\"batch_size\"],sampler=sampler,\n\
+          \                        num_workers=0,pin_memory=True)\n    torch.manual_seed(cfg[\"\
+          seed\"]); torch.cuda.manual_seed_all(cfg[\"seed\"])\n    model = DDP(DigitNet().to(device),device_ids=[local_rank],\n\
+          \                output_device=local_rank)\n    opt = torch.optim.SGD(model.parameters(),lr=cfg[\"\
+          learning_rate\"],momentum=0.9)\n    loss_fn = torch.nn.CrossEntropyLoss()\n\
+          \    for ep in range(cfg[\"epochs\"]):\n        sampler.set_epoch(ep); model.train()\n\
+          \        tl=torch.tensor(0.0,device=device); tb=torch.tensor(0.0,device=device)\n\
+          \        for feat,lab in loader:\n            feat=feat.to(device,non_blocking=True)\n\
+          \            lab=lab.to(device,non_blocking=True)\n            opt.zero_grad(set_to_none=True)\n\
+          \            loss=loss_fn(model(feat),lab); loss.backward(); opt.step()\n\
+          \            tl+=loss.detach(); tb+=1\n        dist.all_reduce(tl,op=dist.ReduceOp.SUM)\n\
+          \        dist.all_reduce(tb,op=dist.ReduceOp.SUM)\n        if rank==0: print(f\"\
+          epoch={ep+1}/{cfg['epochs']} loss={(tl/tb).item():.4f}\")\n    dist.barrier()\n\
+          \    if rank==0:\n        model.module.eval()\n        with torch.no_grad():\n\
+          \            acc=(model.module(x_te.to(device)).argmax(1)==y_te.to(device)).float().mean().item()\n\
+          \        print(f\"test_accuracy={acc:.4f}\")\n        p=Path(cfg[\"model_path\"\
+          ]); p.parent.mkdir(parents=True,exist_ok=True)\n        torch.jit.script(model.module.cpu()).save(str(p))\n\
+          \        print(f\"model_saved={p}\")\n    dist.barrier()\nfinally:\n   \
+          \ dist.destroy_process_group()\n\"\"\"\n\n    train_config = json.dumps({\n\
+          \        \"seed\": seed,\n        \"test_size\": test_size,\n        \"\
+          epochs\": epochs,\n        \"batch_size\": batch_size,\n        \"learning_rate\"\
+          : learning_rate,\n        \"model_path\": model_path,\n    })\n\n    script_b64\
+          \ = base64.b64encode(train_script.strip().encode()).decode()\n\n    trainjob_body\
+          \ = {\n        \"apiVersion\": \"trainer.kubeflow.org/v1alpha1\",\n    \
+          \    \"kind\": \"TrainJob\",\n        \"metadata\": {\"name\": job_name},\n\
+          \        \"spec\": {\n            \"runtimeRef\": {\n                \"\
+          name\": runtime_name,\n                \"kind\": \"ClusterTrainingRuntime\"\
+          ,\n            },\n            \"trainer\": {\n                \"numNodes\"\
+          : num_nodes,\n                \"env\": [\n                    {\"name\"\
+          : \"TRAIN_CONFIG\", \"value\": train_config},\n                ],\n    \
+          \            \"command\": [\n                    \"bash\", \"-c\",\n   \
+          \                 f\"echo {script_b64} | base64 -d > /tmp/_train.py && \"\
+          \n                    \"python /tmp/_train.py\",\n                ],\n \
+          \               \"resourcesPerNode\": {\n                    \"requests\"\
+          : {\n                        \"nvidia.com/gpu\": str(gpus_per_node),\n \
+          \                       \"cpu\": str(cpu_per_node),\n                  \
+          \      \"memory\": memory_per_node,\n                    },\n          \
+          \          \"limits\": {\n                        \"nvidia.com/gpu\": str(gpus_per_node),\n\
+          \                    },\n                },\n            },\n        },\n\
+          \    }\n\n    pod_overrides = []\n\n    if model_pvc_name:\n        pod_overrides.append({\n\
+          \            \"targetJobs\": [{\"name\": \"node\"}],\n            \"spec\"\
+          : {\n                \"volumes\": [{\n                    \"name\": \"model-storage\"\
+          ,\n                    \"persistentVolumeClaim\": {\"claimName\": model_pvc_name},\n\
+          \                }],\n                \"containers\": [{\n             \
+          \       \"name\": \"node\",\n                    \"volumeMounts\": [{\n\
+          \                        \"name\": \"model-storage\",\n                \
+          \        \"mountPath\": \"/mnt/shared\",\n                    }],\n    \
+          \            }],\n            },\n        })\n    else:\n        print(\n\
+          \            \"WARNING: model_pvc_name is empty. \"\n            \"The saved\
+          \ model will remain on the rank-0 worker's ephemeral filesystem.\"\n   \
+          \     )\n\n    if pod_overrides:\n        trainjob_body[\"spec\"][\"podTemplateOverrides\"\
+          ] = pod_overrides\n\n    k8s_config.load_incluster_config()\n    custom_api\
+          \ = k8s_client.CustomObjectsApi()\n\n    with open(\"/var/run/secrets/kubernetes.io/serviceaccount/namespace\"\
+          ) as f:\n        namespace = f.read().strip()\n\n    custom_api.create_namespaced_custom_object(\n\
+          \        group=\"trainer.kubeflow.org\",\n        version=\"v1alpha1\",\n\
+          \        namespace=namespace,\n        plural=\"trainjobs\",\n        body=trainjob_body,\n\
+          \    )\n    print(f\"Created TrainJob: {job_name}\")\n\n    timeout = 1800\n\
+          \    poll_interval = 15\n    elapsed = 0\n\n    while elapsed < timeout:\n\
+          \        time.sleep(poll_interval)\n        elapsed += poll_interval\n\n\
+          \        obj = custom_api.get_namespaced_custom_object(\n            group=\"\
+          trainer.kubeflow.org\",\n            version=\"v1alpha1\",\n           \
+          \ namespace=namespace,\n            plural=\"trainjobs\",\n            name=job_name,\n\
+          \        )\n\n        conditions = obj.get(\"status\", {}).get(\"conditions\"\
+          , [])\n        for cond in conditions:\n            ctype = cond.get(\"\
+          type\", \"\")\n            cstatus = cond.get(\"status\", \"\")\n      \
+          \      if ctype == \"Complete\" and cstatus == \"True\":\n             \
+          \   print(f\"TrainJob {job_name} completed successfully.\")\n          \
+          \      return job_name\n            if ctype == \"Failed\" and cstatus ==\
+          \ \"True\":\n                msg = cond.get(\"message\", \"unknown reason\"\
+          )\n                raise RuntimeError(f\"TrainJob {job_name} failed: {msg}\"\
+          )\n\n        print(f\"Waiting... ({elapsed}s / {timeout}s)\")\n\n    raise\
+          \ TimeoutError(f\"TrainJob {job_name} did not complete within {timeout}s\"\
+          )\n\n"
+        image: image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/runtime-pytorch:pytorch
+        resources:
+          cpuLimit: 2.0
+          cpuRequest: 0.5
+          memoryLimit: 2.147483648
+          memoryRequest: 0.536870912
+          resourceCpuLimit: '2'
+          resourceCpuRequest: 500m
+          resourceMemoryLimit: 2Gi
+          resourceMemoryRequest: 512Mi
+    exec-prepare-data-config:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - prepare_data_config
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef prepare_data_config(\n    seed: int = 42,\n    test_size: float\
+          \ = 0.2,\n) -> str:\n    \"\"\"Validate the bundled digit dataset and return\
+          \ deterministic split config.\"\"\"\n    import json\n\n    from sklearn.datasets\
+          \ import load_digits\n    from sklearn.model_selection import train_test_split\n\
+          \n    digits = load_digits()\n\n    _, _, y_train, y_test = train_test_split(\n\
+          \        digits.images,\n        digits.target,\n        test_size=test_size,\n\
+          \        random_state=seed,\n        stratify=digits.target,\n    )\n\n\
+          \    config = {\n        \"seed\": seed,\n        \"test_size\": test_size,\n\
+          \        \"train_samples\": int(len(y_train)),\n        \"test_samples\"\
+          : int(len(y_test)),\n        \"num_classes\": 10,\n        \"input_shape\"\
+          : [1, 8, 8],\n    }\n\n    print(json.dumps(config, indent=2))\n    return\
+          \ json.dumps(config)\n\n"
+        image: image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/runtime-pytorch:pytorch
+pipelineInfo:
+  description: Two-task KFP pipeline that launches a Kubeflow Trainer v2 TrainJob
+    for multi-node, multi-GPU PyTorch DDP.
+  name: mnist-multi-node-gpu-ddp
+root:
+  dag:
+    tasks:
+      launch-distributed-training:
+        cachingOptions: {}
+        componentRef:
+          name: comp-launch-distributed-training
+        dependentTasks:
+        - prepare-data-config
+        inputs:
+          parameters:
+            batch_size:
+              componentInputParameter: batch_size
+            cpu_per_node:
+              componentInputParameter: cpu_per_node
+            data_config_json:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: prepare-data-config
+            epochs:
+              componentInputParameter: epochs
+            gpus_per_node:
+              componentInputParameter: gpus_per_node
+            learning_rate:
+              componentInputParameter: learning_rate
+            memory_per_node:
+              componentInputParameter: memory_per_node
+            model_path:
+              componentInputParameter: model_path
+            model_pvc_name:
+              componentInputParameter: model_pvc_name
+            num_nodes:
+              componentInputParameter: num_nodes
+            runtime_name:
+              componentInputParameter: runtime_name
+        taskInfo:
+          name: launch-distributed-training
+      prepare-data-config:
+        cachingOptions: {}
+        componentRef:
+          name: comp-prepare-data-config
+        inputs:
+          parameters:
+            seed:
+              componentInputParameter: seed
+            test_size:
+              componentInputParameter: test_size
+        taskInfo:
+          name: prepare-data-config
+  inputDefinitions:
+    parameters:
+      batch_size:
+        defaultValue: 64.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      cpu_per_node:
+        defaultValue: 4.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      epochs:
+        defaultValue: 5.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      gpus_per_node:
+        defaultValue: 1.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      learning_rate:
+        defaultValue: 0.05
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      memory_per_node:
+        defaultValue: 8Gi
+        isOptional: true
+        parameterType: STRING
+      model_path:
+        defaultValue: /mnt/shared/model.pt
+        isOptional: true
+        parameterType: STRING
+      model_pvc_name:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      num_nodes:
+        defaultValue: 2.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      runtime_name:
+        defaultValue: torch-distributed
+        isOptional: true
+        parameterType: STRING
+      seed:
+        defaultValue: 42.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      test_size:
+        defaultValue: 0.2
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.16.0

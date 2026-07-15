@@ -1,0 +1,48 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trainjob-manager
+  namespace: demo
+rules:
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainingruntimes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clustertrainingruntime-reader
+rules:
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["clustertrainingruntimes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-runner-trainjob
+  namespace: demo
+subjects:
+  - kind: ServiceAccount
+    name: pipeline-runner-dspa
+    namespace: demo
+roleRef:
+  kind: Role
+  name: trainjob-manager
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pipeline-runner-clusterruntime-reader
+subjects:
+  - kind: ServiceAccount
+    name: pipeline-runner-dspa
+    namespace: demo
+roleRef:
+  kind: ClusterRole
+  name: clustertrainingruntime-reader
+  apiGroup: rbac.authorization.k8s.io
